@@ -1,0 +1,19 @@
+---
+# Digests of the upstream release assets, keyed by asset filename.
+#
+# How these were established (2026-11-17, node_exporter 1.12.1, released 2026-07-14):
+#   * sha256sums.txt downloaded from the GitHub release
+#   * the linux-amd64 asset downloaded and hashed independently on a separate host, and the result
+#     compared with the list - they match
+#
+# node_exporter releases are not signed, and the list and the assets come from the same place
+# (GitHub releases): this protects against a corrupted or swapped download and against a change
+# of the release after it was pinned, not against a compromise of the release itself.
+#
+# The linux-arm64 entry comes from the list only; no arm64 host was available to hash it.
+#
+# Bumping node_exporter::version REQUIRES adding the entries for the new assets. The class fails
+# rather than installing a binary whose digest it does not know.
+node_exporter::checksums:
+  node_exporter-1.12.1.linux-amd64.tar.gz: 'b51d8a76aa2a9156a55d501aca6276fae09e262259a5e4e831d2c2222f084e63'
+  node_exporter-1.12.1.linux-arm64.tar.gz: 'ad35b605f9954b9f1ffddf5ba054bdc5a98d790b9eae5291e1eeb83f1ecbd0e7'
