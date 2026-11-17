@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## Release 0.2.0
+
+**Features**
+
+- `node_exporter::collector::puppet`: the error messages of the last run (log level err and
+  above) in full - `puppet_last_run_errors` counts them, `puppet_last_run_error_info{index,level,
+  source,message}` carries the first `max_errors` (new parameter, default 10), so an alert can show
+  what failed.
+
+**Bugfixes**
+
+- README: the example `PuppetRunFailing` expression fired twice per host - and failed as a rule -
+  when both signals were 1 (`a == 1 or b == 1` keeps the metric names); now
+  `max without (__name__) (...)`.
+
+**Tests**
+
+- A real `last_run_summary.yaml` written by openvox-agent 8.28.1 as a fixture of the collector
+  tests; a failed run report with catalog, resource and multi-line errors.
+
 ## Release 0.1.0
 
 **Features**

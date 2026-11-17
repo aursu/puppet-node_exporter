@@ -1,6 +1,6 @@
 {
   "name": "aursu-node_exporter",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "aursu",
   "summary": "Install Prometheus node_exporter from a checksum-verified release, with a textfile collector",
   "license": "Apache-2.0",
