@@ -9,7 +9,11 @@ exactly when a report processor on the server goes silent.
 The run report carries Ruby object tags (!ruby/object:...), which the safe YAML loader rejects;
 RubyTagLoader reads them as plain mappings. Nothing in the files is executed.
 
-Usage: puppet_agent.py [--summary FILE] [--report FILE] [--state-dir DIR]
+The error messages of the last run (log level err and above) are exported in full as labels of
+puppet_last_run_error_info, so an alert can show what failed without logging in to the host. They
+are what `puppet agent --test` prints; Puppet itself redacts Sensitive values in them.
+
+Usage: puppet_agent.py [--summary FILE] [--report FILE] [--state-dir DIR] [--max-errors N]
 """
 from __future__ import annotations
 
@@ -25,6 +29,7 @@ import yaml
 DEFAULT_SUMMARY = "/opt/puppetlabs/puppet/public/last_run_summary.yaml"
 DEFAULT_REPORT = "/opt/puppetlabs/puppet/cache/state/last_run_report.yaml"
 DEFAULT_STATE_DIR = "/opt/puppetlabs/puppet/cache/state"
+DEFAULT_MAX_ERRORS = 10
 
 # The C loader is much faster on large reports; fall back to the pure-Python one.
 _BaseLoader = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
@@ -141,11 +146,35 @@ class RunSummary:
 
 
 @dataclass(frozen=True)
+class RunError:
+    """One error message of a run: where it came from (a resource path or "Puppet") and its text."""
+
+    level: str
+    source: str
+    message: str
+
+    # Puppet's log levels from err up (Puppet::Util::Log.levels).
+    LEVELS = ("err", "alert", "emerg", "crit")
+
+    @classmethod
+    def from_log(cls, log: object) -> Optional["RunError"]:
+        """The error of one report log entry, or None for a notice, warning and the like."""
+        entry = _mapping(log)
+        level = str(entry.get("level", "") or "").lstrip(":")
+        if level not in cls.LEVELS:
+            return None
+        return cls(level=level, source=str(entry.get("source", "") or ""),
+                   message=str(entry.get("message", "") or "").strip())
+
+
+@dataclass(frozen=True)
 class RunReport:
-    """last_run_report.yaml: the outcome of the last run, and whether a cached catalog was used."""
+    """last_run_report.yaml: the outcome of the last run, whether a cached catalog was used, and
+    the run's error messages in the order they were logged, duplicates removed."""
 
     status: str
     cached_catalog_status: str
+    errors: tuple[RunError, ...] = ()
 
     @classmethod
     def from_file(cls, path: Path) -> Optional["RunReport"]:
@@ -153,9 +182,12 @@ class RunReport:
             data = _mapping(yaml.load(path.read_text(encoding="utf-8"), Loader=RubyTagLoader))
         except (OSError, yaml.YAMLError):
             return None
+        logs = data.get("logs")
+        errors = (RunError.from_log(log) for log in (logs if isinstance(logs, list) else []))
         return cls(
             status=str(data.get("status", "") or ""),
             cached_catalog_status=str(data.get("cached_catalog_status", "") or ""),
+            errors=tuple(dict.fromkeys(e for e in errors if e is not None)),
         )
 
 
@@ -187,11 +219,13 @@ class PuppetAgentCollector:
 
     RESOURCE_STATES = ("total", "changed", "failed", "failed_to_restart", "out_of_sync", "corrective_change", "skipped")
 
-    def __init__(self, summary: Path, report: Path, state_dir: Path, clock: Callable[[], float] = time.time) -> None:
+    def __init__(self, summary: Path, report: Path, state_dir: Path, clock: Callable[[], float] = time.time,
+                 max_errors: int = DEFAULT_MAX_ERRORS) -> None:
         self.summary_path = summary
         self.report_path = report
         self.state_dir = state_dir
         self.clock = clock
+        self.max_errors = max_errors
 
     def collect(self) -> list[Metric]:
         summary = RunSummary.from_file(self.summary_path)
@@ -235,6 +269,12 @@ class PuppetAgentCollector:
         if report is not None:
             metrics.append(Metric("puppet_catalog_from_cache", "Whether the last run applied a cached catalog because compiling a new one failed.")
                            .add(1.0 if report.cached_catalog_status == "on_failure" else 0.0))
+            metrics.append(Metric("puppet_last_run_errors", "Error messages (level err and above) of the last run.")
+                           .add(float(len(report.errors))))
+            error_info = Metric("puppet_last_run_error_info", "The first error messages of the last run, in full; always 1.")
+            for index, error in enumerate(report.errors[:self.max_errors], start=1):
+                error_info.add(1.0, index=str(index), level=error.level, source=error.source, message=error.message)
+            metrics.append(error_info)
 
         metrics.append(Metric("puppet_agent_info", "The agent version, environment and catalog version of the last run.")
                        .add(1.0, version=summary.puppet_version, environment=summary.environment,
@@ -253,8 +293,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--summary", type=Path, default=Path(DEFAULT_SUMMARY))
     parser.add_argument("--report", type=Path, default=Path(DEFAULT_REPORT))
     parser.add_argument("--state-dir", type=Path, default=Path(DEFAULT_STATE_DIR))
+    parser.add_argument("--max-errors", type=int, default=DEFAULT_MAX_ERRORS,
+                        help="how many error messages of the last run to export (default %(default)s)")
     args = parser.parse_args(argv)
-    collector = PuppetAgentCollector(args.summary, args.report, args.state_dir)
+    collector = PuppetAgentCollector(args.summary, args.report, args.state_dir, max_errors=args.max_errors)
     sys.stdout.write(Exposition().render(collector.collect()))
     return 0
 

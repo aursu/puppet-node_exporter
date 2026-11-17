@@ -94,9 +94,15 @@ when the agent cannot reach its server.
 | `puppet_last_run_events{state}` | success, failure |
 | `puppet_last_run_failed` | 1 when the report says failed, or resources or events failed |
 | `puppet_catalog_from_cache` | 1 when a cached catalog was applied because compiling failed |
+| `puppet_last_run_errors` | how many error messages (log level err and above) the last run logged |
+| `puppet_last_run_error_info{index,level,source,message}` | the first `max_errors` of them (default 10), the message in full; always 1 |
 | `puppet_agent_disabled`, `puppet_agent_running` | the agent's lock files |
 | `puppet_agent_info{version,environment,config_version}` | always 1 |
 | `puppet_textfile_collector_success`, `..._timestamp_seconds` | the collector itself |
+
+The error messages are what `puppet agent --test` prints for the run; Puppet redacts values of
+the `Sensitive` type in them. Anything else secret that shows up there should be fixed in the
+Puppet code (`Sensitive`, `show_diff => false`), not hidden by the collector.
 
 Example alerts:
 
@@ -104,8 +110,15 @@ Example alerts:
 - alert: PuppetAgentStale
   expr: time() - puppet_last_run_timestamp_seconds > 7200
 - alert: PuppetRunFailing
-  expr: puppet_last_run_failed == 1 or puppet_catalog_from_cache == 1
+  # max without the metric name: one alert per host even when both are 1
+  expr: max without (__name__) ({__name__=~"puppet_last_run_failed|puppet_catalog_from_cache"}) == 1
   for: 3h
+  annotations:
+    # the run's errors on the alert itself
+    errors: >-
+      {{ range printf "puppet_last_run_error_info{instance='%s'}" $labels.instance | query }}
+      {{ .Labels.source }}: {{ .Labels.message }}
+      {{ end }}
 ```
 
 ## Reference

@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "files" / "collectors" / "puppet_agent.py"
+# A real run summary, as openvox-agent 8.28.1 wrote it (a run that changed 17 of 323 resources).
+_FIXTURES = Path(__file__).resolve().parent / "fixtures"
 _spec = importlib.util.spec_from_file_location("puppet_agent", _SCRIPT)
 puppet_agent = importlib.util.module_from_spec(_spec)
 sys.modules["puppet_agent"] = puppet_agent  # dataclasses look their module up there
@@ -60,6 +62,42 @@ logs:
   level: !ruby/sym notice
   message: Applied catalog in 9.81 seconds
 resource_statuses: {{}}
+"""
+
+# A failed run: a catalog compile error, two failed resources, one of them logged twice, a
+# warning and a multi-line message. Levels as Puppet writes them (Ruby symbols).
+FAILED_REPORT = """--- !ruby/object:Puppet::Transaction::Report
+host: web1.example.org
+status: failed
+cached_catalog_status: not_used
+logs:
+- !ruby/object:Puppet::Util::Log
+  level: !ruby/sym warning
+  message: Unable to fetch my node definition, but the agent run will continue
+  source: Puppet
+- !ruby/object:Puppet::Util::Log
+  level: !ruby/sym err
+  message: 'Could not retrieve catalog from remote server: Error 500 on SERVER: Server Error: Evaluation Error: Unknown variable: ''$foo'' (file: /etc/puppetlabs/code/environments/production/site/profile/manifests/base.pp, line: 42, column: 7) on node web1.example.org'
+  source: Puppet
+- !ruby/object:Puppet::Util::Log
+  level: !ruby/sym err
+  message: |-
+    change from 'absent' to 'present' failed: Execution of '/usr/bin/apt-get -q -y install nginx' returned 100: E: Unable to locate package nginx
+  source: /Stage[main]/Profile::Web/Package[nginx]/ensure
+- !ruby/object:Puppet::Util::Log
+  level: !ruby/sym err
+  message: |-
+    change from 'absent' to 'present' failed: Execution of '/usr/bin/apt-get -q -y install nginx' returned 100: E: Unable to locate package nginx
+  source: /Stage[main]/Profile::Web/Package[nginx]/ensure
+- !ruby/object:Puppet::Util::Log
+  level: !ruby/sym crit
+  message: "Could not start Service[nginx]: Execution of 'systemctl start nginx' returned 1:\\nJob for nginx.service failed."
+  source: /Stage[main]/Profile::Web/Service[nginx]/ensure
+- !ruby/object:Puppet::Util::Log
+  level: !ruby/sym notice
+  message: Applied catalog in 3.20 seconds
+  source: Puppet
+resource_statuses: {}
 """
 
 
@@ -138,6 +176,51 @@ class CollectorTest(unittest.TestCase):
 
     def test_label_escaping(self) -> None:
         self.assertEqual(puppet_agent.Exposition._escape('a"b\\c\nd'), 'a\\"b\\\\c\\nd')
+
+    def test_real_openvox_summary(self) -> None:
+        self.summary.write_text((_FIXTURES / "last_run_summary-openvox-8.28.1.yaml").read_text(encoding="utf-8"),
+                                encoding="utf-8")
+        out = self.render()
+        self.assertIn("puppet_textfile_collector_success 1\n", out)
+        self.assertIn("puppet_last_run_timestamp_seconds 1794878541\n", out)
+        self.assertIn("puppet_last_run_duration_seconds 27.197605649\n", out)
+        self.assertIn('puppet_last_run_resources{state="total"} 323\n', out)
+        self.assertIn('puppet_last_run_resources{state="changed"} 17\n', out)
+        self.assertIn('puppet_last_run_events{state="success"} 17\n', out)
+        self.assertIn("puppet_last_run_failed 0\n", out)
+        self.assertIn('puppet_agent_info{config_version="1794878521",environment="production",version="8.28.1"} 1\n', out)
+
+    def test_healthy_run_has_no_errors(self) -> None:
+        self.write()
+        out = self.render()
+        self.assertIn("puppet_last_run_errors 0\n", out)
+        self.assertNotIn("puppet_last_run_error_info", out)
+
+    def test_failed_run_errors_in_full(self) -> None:
+        self.summary.write_text(SUMMARY, encoding="utf-8")
+        self.report.write_text(FAILED_REPORT, encoding="utf-8")
+        out = self.render()
+        self.assertIn("puppet_last_run_failed 1\n", out)
+        # err and crit count, the warning and the notice do not; the repeated message once.
+        self.assertIn("puppet_last_run_errors 3\n", out)
+        self.assertIn('puppet_last_run_error_info{index="1",level="err",message="Could not retrieve catalog from remote server: '
+                      'Error 500 on SERVER: Server Error: Evaluation Error: Unknown variable: \'$foo\' (file: '
+                      '/etc/puppetlabs/code/environments/production/site/profile/manifests/base.pp, line: 42, column: 7) '
+                      'on node web1.example.org",source="Puppet"} 1\n', out)
+        self.assertIn('{index="2",level="err",message="change from \'absent\' to \'present\' failed: Execution of '
+                      '\'/usr/bin/apt-get -q -y install nginx\' returned 100: E: Unable to locate package nginx",'
+                      'source="/Stage[main]/Profile::Web/Package[nginx]/ensure"} 1\n', out)
+        # The full text, line breaks escaped as the exposition format requires.
+        self.assertIn('{index="3",level="crit",message="Could not start Service[nginx]: Execution of \'systemctl start nginx\' '
+                      'returned 1:\\nJob for nginx.service failed.",source="/Stage[main]/Profile::Web/Service[nginx]/ensure"} 1\n', out)
+
+    def test_error_count_bounded(self) -> None:
+        self.summary.write_text(SUMMARY, encoding="utf-8")
+        self.report.write_text(FAILED_REPORT, encoding="utf-8")
+        collector = puppet_agent.PuppetAgentCollector(self.summary, self.report, self.dir, clock=lambda: 0.0, max_errors=1)
+        out = puppet_agent.Exposition().render(collector.collect())
+        self.assertIn("puppet_last_run_errors 3\n", out)
+        self.assertEqual(out.count("puppet_last_run_error_info{"), 1)
 
 
 if __name__ == "__main__":
